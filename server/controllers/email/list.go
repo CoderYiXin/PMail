@@ -2,14 +2,15 @@ package email
 
 import (
 	"encoding/json"
+	"github.com/Jinnrry/pmail/dto"
+	"github.com/Jinnrry/pmail/dto/response"
+	"github.com/Jinnrry/pmail/services/list"
+	"github.com/Jinnrry/pmail/utils/context"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
 	"io"
 	"math"
 	"net/http"
-	"pmail/dto/response"
-	"pmail/services/list"
-	"pmail/utils/context"
 )
 
 type emailListResponse struct {
@@ -25,7 +26,9 @@ type emilItem struct {
 	Datetime  string `json:"datetime"`
 	IsRead    bool   `json:"is_read"`
 	Sender    User   `json:"sender"`
+	To        []User `json:"to"`
 	Dangerous bool   `json:"dangerous"`
+	Error     string `json:"error"`
 }
 
 type User struct {
@@ -61,11 +64,21 @@ func EmailList(ctx *context.Context, w http.ResponseWriter, req *http.Request) {
 		retData.PageSize = 15
 	}
 
-	emailList, total := list.GetEmailList(ctx, retData.Tag, retData.Keyword, offset, retData.PageSize)
+	var tagInfo dto.SearchTag = dto.SearchTag{
+		Type:    -1,
+		Status:  -1,
+		GroupId: -1,
+	}
+	_ = json.Unmarshal([]byte(retData.Tag), &tagInfo)
+
+	emailList, total := list.GetEmailList(ctx, tagInfo, retData.Keyword, false, offset, retData.PageSize)
 
 	for _, email := range emailList {
 		var sender User
 		_ = json.Unmarshal([]byte(email.Sender), &sender)
+
+		var tos []User
+		_ = json.Unmarshal([]byte(email.To), &tos)
 
 		lst = append(lst, &emilItem{
 			ID:        email.Id,
@@ -74,7 +87,9 @@ func EmailList(ctx *context.Context, w http.ResponseWriter, req *http.Request) {
 			Datetime:  email.SendDate.Format("2006-01-02 15:04:05"),
 			IsRead:    email.IsRead == 1,
 			Sender:    sender,
+			To:        tos,
 			Dangerous: email.SPFCheck == 0 && email.DKIMCheck == 0,
+			Error:     email.Error.String,
 		})
 	}
 

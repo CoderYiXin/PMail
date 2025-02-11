@@ -1,14 +1,15 @@
 package setup
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"pmail/i18n"
-	"pmail/services/auth"
-	"pmail/utils/context"
-	"pmail/utils/errors"
+	"github.com/Jinnrry/pmail/config"
+	"strings"
+
+	"github.com/Jinnrry/pmail/i18n"
+	"github.com/Jinnrry/pmail/services/auth"
+	"github.com/Jinnrry/pmail/utils/context"
+	"github.com/Jinnrry/pmail/utils/errors"
+	"github.com/Jinnrry/pmail/utils/ip"
 )
 
 type DNSItem struct {
@@ -19,36 +20,26 @@ type DNSItem struct {
 	Tips  string `json:"tips"`
 }
 
-func GetDNSSettings(ctx *context.Context) ([]*DNSItem, error) {
-	configData, err := ReadConfig()
+func GetDNSSettings(ctx *context.Context) (map[string][]*DNSItem, error) {
+	configData, err := config.ReadConfig()
 	if err != nil {
 		return nil, errors.Wrap(err)
 	}
 
-	ret := []*DNSItem{
-		{Type: "A", Host: "smtp", Value: getIp(), TTL: 3600, Tips: i18n.GetText(ctx.Lang, "ip_taps")},
-		{Type: "MX", Host: "-", Value: fmt.Sprintf("smtp.%s", configData.Domain), TTL: 3600},
-		{Type: "TXT", Host: "-", Value: "v=spf1 a mx ~all", TTL: 3600},
-		{Type: "TXT", Host: "default._domainkey", Value: auth.DkimGen(), TTL: 3600},
-	}
-	return ret, nil
-}
+	ret := make(map[string][]*DNSItem)
 
-func getIp() string {
-	resp, err := http.Get("http://ip-api.com/json/?lang=zh-CN ")
-	if err != nil {
-		return "Your Server IP"
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 200 {
-		body, err := io.ReadAll(resp.Body)
-		if err == nil {
-			var queryRes map[string]string
-			_ = json.Unmarshal(body, &queryRes)
-
-			return queryRes["query"]
+	for _, domain := range configData.Domains {
+		ret[domain] = []*DNSItem{
+			{Type: "A", Host: strings.ReplaceAll(configData.WebDomain, "."+configData.Domain, ""), Value: ip.GetIp(), TTL: 3600, Tips: i18n.GetText(ctx.Lang, "ip_taps")},
+			{Type: "A", Host: "smtp", Value: ip.GetIp(), TTL: 3600, Tips: i18n.GetText(ctx.Lang, "ip_taps")},
+			{Type: "A", Host: "imap", Value: ip.GetIp(), TTL: 3600, Tips: i18n.GetText(ctx.Lang, "ip_taps")},
+			{Type: "A", Host: "pop", Value: ip.GetIp(), TTL: 3600, Tips: i18n.GetText(ctx.Lang, "ip_taps")},
+			{Type: "A", Host: "@", Value: ip.GetIp(), TTL: 3600, Tips: i18n.GetText(ctx.Lang, "ip_taps")},
+			{Type: "MX", Host: "@", Value: fmt.Sprintf("smtp.%s", domain), TTL: 3600},
+			{Type: "TXT", Host: "@", Value: "v=spf1 a mx ~all", TTL: 3600},
+			{Type: "TXT", Host: "default._domainkey", Value: auth.DkimGen(), TTL: 3600},
 		}
 	}
-	return "Your Server IP"
+
+	return ret, nil
 }

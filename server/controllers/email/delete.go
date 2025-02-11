@@ -2,16 +2,17 @@ package email
 
 import (
 	"encoding/json"
+	"github.com/Jinnrry/pmail/dto/response"
+	"github.com/Jinnrry/pmail/services/del_email"
+	"github.com/Jinnrry/pmail/utils/context"
 	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
-	"pmail/dto/response"
-	"pmail/services/del_email"
-	"pmail/utils/context"
 )
 
 type emailDeleteRequest struct {
-	IDs []int `json:"ids"`
+	IDs       []int `json:"ids"`
+	ForcedDel bool  `json:"forcedDel"`
 }
 
 func EmailDelete(ctx *context.Context, w http.ResponseWriter, req *http.Request) {
@@ -30,7 +31,7 @@ func EmailDelete(ctx *context.Context, w http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	err = del_email.DelEmail(ctx, reqData.IDs)
+	err = del_email.DelEmail(ctx, reqData.IDs, reqData.ForcedDel)
 	if err != nil {
 		response.NewErrorResponse(response.ServerError, err.Error(), "").FPrint(w)
 		return

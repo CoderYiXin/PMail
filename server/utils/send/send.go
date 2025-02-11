@@ -4,14 +4,19 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
+	"github.com/Jinnrry/pmail/config"
+	"github.com/Jinnrry/pmail/dto/parsemail"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/utils/array"
+	"github.com/Jinnrry/pmail/utils/async"
+	"github.com/Jinnrry/pmail/utils/consts"
+	"github.com/Jinnrry/pmail/utils/context"
+	"github.com/Jinnrry/pmail/utils/smtp"
 	log "github.com/sirupsen/logrus"
 	"net"
-	"pmail/dto/parsemail"
-	"pmail/utils/array"
-	"pmail/utils/async"
-	"pmail/utils/context"
-	"pmail/utils/smtp"
 	"strings"
+	"sync"
 )
 
 type mxDomain struct {
@@ -20,10 +25,14 @@ type mxDomain struct {
 }
 
 // Forward 转发邮件
-func Forward(ctx *context.Context, e *parsemail.Email, forwardAddress string) error {
+func Forward(ctx *context.Context, e *parsemail.Email, forwardAddress string, user *models.User) error {
 
 	log.WithContext(ctx).Debugf("开始转发邮件")
-	b := e.ForwardBuildBytes(ctx, forwardAddress)
+	sender := fmt.Sprintf("%s@%s", user.Account, config.Instance.Domains[0])
+
+	b := e.ForwardBuildBytes(ctx, user)
+
+	log.WithContext(ctx).Debugf("%s", b)
 
 	var to []*parsemail.User
 	to = []*parsemail.User{
@@ -35,22 +44,31 @@ func Forward(ctx *context.Context, e *parsemail.Email, forwardAddress string) er
 	for _, s := range to {
 		args := strings.Split(s.EmailAddress, "@")
 		if len(args) == 2 {
-			//查询dns mx记录
-			mxInfo, err := net.LookupMX(args[1])
-			address := mxDomain{
-				domain: "smtp." + args[1],
-				mxHost: "smtp." + args[1],
-			}
-			if err != nil {
-				log.WithContext(ctx).Errorf(s.EmailAddress, "域名mx记录查询失败")
-			}
-			if len(mxInfo) > 0 {
-				address = mxDomain{
-					domain: args[1],
-					mxHost: mxInfo[0].Host,
+			if args[1] == consts.TEST_DOMAIN {
+				// 测试使用
+				address := mxDomain{
+					domain: "localhost",
+					mxHost: "127.0.0.1",
 				}
+				toByDomain[address] = append(toByDomain[address], s)
+			} else {
+				//查询dns mx记录
+				mxInfo, err := net.LookupMX(args[1])
+				address := mxDomain{
+					domain: "smtp." + args[1],
+					mxHost: "smtp." + args[1],
+				}
+				if err != nil {
+					log.WithContext(ctx).Errorf(s.EmailAddress, "域名mx记录查询失败")
+				}
+				if len(mxInfo) > 0 {
+					address = mxDomain{
+						domain: args[1],
+						mxHost: mxInfo[0].Host,
+					}
+				}
+				toByDomain[address] = append(toByDomain[address], s)
 			}
-			toByDomain[address] = append(toByDomain[address], s)
 		} else {
 			log.WithContext(ctx).Errorf("邮箱地址解析错误！ %s", s)
 			continue
@@ -59,51 +77,34 @@ func Forward(ctx *context.Context, e *parsemail.Email, forwardAddress string) er
 
 	var errEmailAddress []string
 
-	errMap := map[string]error{}
-
 	as := async.New(ctx)
 	for domain, tos := range toByDomain {
 		domain := domain
 		tos := tos
 		as.WaitProcess(func(p any) {
+			err := smtp.SendMail("", domain.mxHost+":25", nil, sender, config.Instance.Domains[0], buildAddress(tos), b)
 
-			err := smtp.SendMailWithTls("", domain.mxHost+":465", nil, e.From.EmailAddress, buildAddress(tos), b)
-
+			// 使用其他方式发送
 			if err != nil {
-				log.WithContext(ctx).Warnf("SMTPS on 465 Send Error! Error:%+v", err)
-				// smtps发送失败，尝试smtp
-				err = smtp.SendMail("", domain.mxHost+":25", nil, e.From.EmailAddress, buildAddress(tos), b)
-				if err != nil {
-					log.WithContext(ctx).Warnf("SMTP Send Error! Error:%+v", err)
-				} else {
-					log.WithContext(ctx).Infof("SMTP Send Success !")
+				// EOF 表示未知错误，此时降级为非tls连接发送（目前仅139邮箱有这个问题）
+				if errors.Is(err, smtp.NoSupportSTARTTLSError) || err.Error() == "EOF" {
+					err = smtp.SendMailWithTls("", domain.mxHost+":465", nil, sender, config.Instance.Domains[0], buildAddress(tos), b)
+					if err != nil {
+						log.WithContext(ctx).Warnf("Unsafe! %s Server Not Support SMTPS & STARTTLS", domain.domain)
+						err = smtp.SendMailUnsafe("", domain.mxHost+":25", nil, sender, config.Instance.Domains[0], buildAddress(tos), b)
+					}
 				}
-			} else {
-				log.WithContext(ctx).Infof("SMTPS on 465 Send Success !")
-			}
 
-			// 重新选取证书域名
-			if err != nil {
+				// 证书错误，从新选取证书发送
 				if certificateErr, ok := err.(*tls.CertificateVerificationError); ok {
-					if hostnameErr, is := certificateErr.Err.(x509.HostnameError); is {
+					// 单测使用
+					if domain.domain == "localhost" {
+						err = smtp.SendMailUnsafe("", domain.mxHost+":25", nil, sender, config.Instance.Domains[0], buildAddress(tos), b)
+					} else if hostnameErr, is := certificateErr.Err.(x509.HostnameError); is {
 						if hostnameErr.Certificate != nil {
 							certificateHostName := hostnameErr.Certificate.DNSNames
-
-							// 再使用smtps 465端口 尝试
-							err = smtp.SendMailWithTls(domainMatch(domain.domain, certificateHostName), domain.mxHost+":465", nil, e.From.EmailAddress, buildAddress(tos), b)
-
-							if err != nil {
-								log.WithContext(ctx).Warnf("SMTPS on 465 Send Error! Error:%+v", err)
-								// smtps发送失败，尝试smtp
-								err = smtp.SendMail(domainMatch(domain.domain, certificateHostName), domain.mxHost+":25", nil, e.From.EmailAddress, buildAddress(tos), b)
-								if err != nil {
-									log.WithContext(ctx).Warnf("SMTP Send Error! Error:%+v", err)
-								} else {
-									log.WithContext(ctx).Infof("SMTP Send Success !")
-								}
-							} else {
-								log.WithContext(ctx).Infof("SMTPS Send Success !")
-							}
+							// 重新选取证书发送
+							err = smtp.SendMail(domainMatch(domain.domain, certificateHostName), domain.mxHost+":25", nil, sender, config.Instance.Domains[0], buildAddress(tos), b)
 						}
 					}
 				}
@@ -115,7 +116,6 @@ func Forward(ctx *context.Context, e *parsemail.Email, forwardAddress string) er
 					errEmailAddress = append(errEmailAddress, user.EmailAddress)
 				}
 			}
-			errMap[domain.domain] = err
 		}, nil)
 	}
 	as.Wait()
@@ -128,7 +128,9 @@ func Forward(ctx *context.Context, e *parsemail.Email, forwardAddress string) er
 
 func Send(ctx *context.Context, e *parsemail.Email) (error, map[string]error) {
 
-	b := e.BuildBytes(ctx)
+	_, fromDomain := e.From.GetDomainAccount()
+
+	b := e.BuildBytes(ctx, true)
 
 	var to []*parsemail.User
 	to = append(append(append(to, e.To...), e.Cc...), e.Bcc...)
@@ -138,22 +140,31 @@ func Send(ctx *context.Context, e *parsemail.Email) (error, map[string]error) {
 	for _, s := range to {
 		args := strings.Split(s.EmailAddress, "@")
 		if len(args) == 2 {
-			//查询dns mx记录
-			mxInfo, err := net.LookupMX(args[1])
-			address := mxDomain{
-				domain: "smtp." + args[1],
-				mxHost: "smtp." + args[1],
-			}
-			if err != nil {
-				log.WithContext(ctx).Errorf(s.EmailAddress, "域名mx记录查询失败")
-			}
-			if len(mxInfo) > 0 {
-				address = mxDomain{
-					domain: args[1],
-					mxHost: mxInfo[0].Host,
+			if args[1] == consts.TEST_DOMAIN {
+				// 测试使用
+				address := mxDomain{
+					domain: "localhost",
+					mxHost: "127.0.0.1",
 				}
+				toByDomain[address] = append(toByDomain[address], s)
+			} else {
+				//查询dns mx记录
+				mxInfo, err := net.LookupMX(args[1])
+				address := mxDomain{
+					domain: "smtp." + args[1],
+					mxHost: "smtp." + args[1],
+				}
+				if err != nil {
+					log.WithContext(ctx).Errorf(s.EmailAddress, "域名mx记录查询失败，检查邮箱是否存在！")
+				}
+				if len(mxInfo) > 0 {
+					address = mxDomain{
+						domain: args[1],
+						mxHost: mxInfo[0].Host,
+					}
+				}
+				toByDomain[address] = append(toByDomain[address], s)
 			}
-			toByDomain[address] = append(toByDomain[address], s)
 		} else {
 			log.WithContext(ctx).Errorf("邮箱地址解析错误！ %s", s)
 			continue
@@ -162,7 +173,7 @@ func Send(ctx *context.Context, e *parsemail.Email) (error, map[string]error) {
 
 	var errEmailAddress []string
 
-	errMap := map[string]error{}
+	errMap := sync.Map{}
 
 	as := async.New(ctx)
 	for domain, tos := range toByDomain {
@@ -170,42 +181,29 @@ func Send(ctx *context.Context, e *parsemail.Email) (error, map[string]error) {
 		tos := tos
 		as.WaitProcess(func(p any) {
 
-			err := smtp.SendMailWithTls("", domain.mxHost+":465", nil, e.From.EmailAddress, buildAddress(tos), b)
+			err := smtp.SendMail("", domain.mxHost+":25", nil, e.From.EmailAddress, fromDomain, buildAddress(tos), b)
 
+			// 使用其他方式发送
 			if err != nil {
-				log.WithContext(ctx).Warnf("SMTPS on 465 Send Error! Error:%+v", err)
-				// smtps发送失败，尝试smtp
-				err = smtp.SendMail("", domain.mxHost+":25", nil, e.From.EmailAddress, buildAddress(tos), b)
-				if err != nil {
-					log.WithContext(ctx).Warnf("SMTP Send Error! Error:%+v", err)
-				} else {
-					log.WithContext(ctx).Infof("SMTP Send Success !")
+				// EOF 表示未知错误，此时降级为非tls连接发送（目前仅139邮箱有这个问题）
+				if errors.Is(err, smtp.NoSupportSTARTTLSError) || err.Error() == "EOF" {
+					err = smtp.SendMailWithTls("", domain.mxHost+":465", nil, e.From.EmailAddress, fromDomain, buildAddress(tos), b)
+					if err != nil {
+						log.WithContext(ctx).Warnf("Unsafe! %s Server Not Support SMTPS & STARTTLS", domain.domain)
+						err = smtp.SendMailUnsafe("", domain.mxHost+":25", nil, e.From.EmailAddress, fromDomain, buildAddress(tos), b)
+					}
 				}
-			} else {
-				log.WithContext(ctx).Infof("SMTPS Send Success !")
-			}
 
-			// 重新选取证书域名
-			if err != nil {
+				// 证书错误，从新选取证书发送
 				if certificateErr, ok := err.(*tls.CertificateVerificationError); ok {
-					if hostnameErr, is := certificateErr.Err.(x509.HostnameError); is {
+					// 单测使用
+					if domain.domain == "localhost" {
+						err = smtp.SendMailUnsafe("", domain.mxHost+":25", nil, e.From.EmailAddress, fromDomain, buildAddress(tos), b)
+					} else if hostnameErr, is := certificateErr.Err.(x509.HostnameError); is {
 						if hostnameErr.Certificate != nil {
 							certificateHostName := hostnameErr.Certificate.DNSNames
-
-							err = smtp.SendMailWithTls(domainMatch(domain.domain, certificateHostName), domain.mxHost+":465", nil, e.From.EmailAddress, buildAddress(tos), b)
-
-							if err != nil {
-								log.WithContext(ctx).Warnf("SMTPS on 465 Send Error! Error:%+v", err)
-								// smtps发送失败，尝试smtp
-								err = smtp.SendMail(domainMatch(domain.domain, certificateHostName), domain.mxHost+":25", nil, e.From.EmailAddress, buildAddress(tos), b)
-								if err != nil {
-									log.WithContext(ctx).Warnf("SMTP Send Error! Error:%+v", err)
-								} else {
-									log.WithContext(ctx).Infof("SMTP Send Success !")
-								}
-							} else {
-								log.WithContext(ctx).Infof("SMTPS Send Success !")
-							}
+							// 重新选取证书发送
+							err = smtp.SendMail(domainMatch(domain.domain, certificateHostName), domain.mxHost+":25", nil, e.From.EmailAddress, fromDomain, buildAddress(tos), b)
 						}
 					}
 				}
@@ -217,15 +215,26 @@ func Send(ctx *context.Context, e *parsemail.Email) (error, map[string]error) {
 					errEmailAddress = append(errEmailAddress, user.EmailAddress)
 				}
 			}
-			errMap[domain.domain] = err
+			errMap.Store(domain.domain, err)
 		}, nil)
 	}
 	as.Wait()
 
+	orgMap := map[string]error{}
+	errMap.Range(func(key, value any) bool {
+		if value != nil {
+			orgMap[key.(string)] = value.(error)
+		} else {
+			orgMap[key.(string)] = nil
+		}
+
+		return true
+	})
+
 	if len(errEmailAddress) > 0 {
-		return errors.New("以下收件人投递失败：" + array.Join(errEmailAddress, ",")), errMap
+		return errors.New("以下收件人投递失败：" + array.Join(errEmailAddress, ",")), orgMap
 	}
-	return nil, errMap
+	return nil, orgMap
 
 }
 
@@ -241,6 +250,10 @@ func buildAddress(u []*parsemail.User) []string {
 }
 
 func domainMatch(domain string, dnsNames []string) string {
+	if len(dnsNames) == 0 {
+		return domain
+	}
+
 	secondMatch := ""
 
 	for _, name := range dnsNames {

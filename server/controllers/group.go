@@ -2,16 +2,15 @@ package controllers
 
 import (
 	"encoding/json"
+	"github.com/Jinnrry/pmail/dto"
+	"github.com/Jinnrry/pmail/dto/response"
+	"github.com/Jinnrry/pmail/i18n"
+	"github.com/Jinnrry/pmail/services/group"
+	"github.com/Jinnrry/pmail/utils/array"
+	"github.com/Jinnrry/pmail/utils/context"
 	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
-	"pmail/db"
-	"pmail/dto"
-	"pmail/dto/response"
-	"pmail/i18n"
-	"pmail/services/group"
-	"pmail/utils/array"
-	"pmail/utils/context"
 )
 
 func GetUserGroupList(ctx *context.Context, w http.ResponseWriter, req *http.Request) {
@@ -31,11 +30,19 @@ func GetUserGroup(ctx *context.Context, w http.ResponseWriter, req *http.Request
 				},
 				{
 					Label: i18n.GetText(ctx.Lang, "outbox"),
-					Tag:   dto.SearchTag{Type: 1, Status: 1}.ToString(),
+					Tag:   dto.SearchTag{Type: 1, Status: -1}.ToString(),
 				},
 				{
 					Label: i18n.GetText(ctx.Lang, "sketch"),
 					Tag:   dto.SearchTag{Type: 1, Status: 0}.ToString(),
+				},
+				{
+					Label: i18n.GetText(ctx.Lang, "junk"),
+					Tag:   dto.SearchTag{Type: -1, Status: 5}.ToString(),
+				},
+				{
+					Label: i18n.GetText(ctx.Lang, "deleted"),
+					Tag:   dto.SearchTag{Type: -1, Status: 3}.ToString(),
 				},
 			},
 		},
@@ -62,17 +69,14 @@ func AddGroup(ctx *context.Context, w http.ResponseWriter, req *http.Request) {
 		log.WithContext(ctx).Errorf("%+v", err)
 	}
 
-	res, err := db.Instance.Exec(db.WithContext(ctx, "insert into `group` (name,parent_id,user_id) values (?,?,?)"), reqData.Name, reqData.ParentId, ctx.UserID)
+	newGroup, err := group.CreateGroup(ctx, reqData.Name, reqData.ParentId)
+
 	if err != nil {
 		response.NewErrorResponse(response.ServerError, "DBError", err.Error()).FPrint(w)
 		return
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		response.NewErrorResponse(response.ServerError, "DBError", err.Error()).FPrint(w)
-		return
-	}
-	response.NewSuccessResponse(id).FPrint(w)
+
+	response.NewSuccessResponse(newGroup.ID).FPrint(w)
 }
 
 type delGroupRequest struct {

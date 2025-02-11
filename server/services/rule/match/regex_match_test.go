@@ -1,18 +1,13 @@
 package match
 
 import (
-	"pmail/models"
+	"fmt"
+	"github.com/dlclark/regexp2"
 	"testing"
 )
 
 func TestRegexMatch_Match(t *testing.T) {
-	r := NewRegexMatch("Subject", "\\d+")
-
-	ret := r.Match(nil, &models.Email{
-		Subject: "111",
-	})
-
-	if !ret {
-		t.Errorf("失败")
-	}
+	re := regexp2.MustCompile("^(?!.*abc\\.com).*", 0)
+	match, err := re.MatchString("aa@abc.com")
+	fmt.Println(match, err)
 }

@@ -1,26 +1,23 @@
 package setup
 
 import (
-	"encoding/json"
-	"os"
-	"pmail/config"
-	"pmail/db"
-	"pmail/models"
-	"pmail/utils/array"
-	"pmail/utils/context"
-	"pmail/utils/errors"
-	"pmail/utils/file"
-	"pmail/utils/password"
+	"github.com/Jinnrry/pmail/config"
+	"github.com/Jinnrry/pmail/db"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/utils/array"
+	"github.com/Jinnrry/pmail/utils/context"
+	"github.com/Jinnrry/pmail/utils/errors"
+	"github.com/Jinnrry/pmail/utils/password"
 )
 
 func GetDatabaseSettings(ctx *context.Context) (string, string, error) {
-	configData, err := ReadConfig()
+	configData, err := config.ReadConfig()
 	if err != nil {
 		return "", "", errors.Wrap(err)
 	}
 
 	if configData.DbType == "" && configData.DbDSN == "" {
-		return config.DBTypeSQLite, "./config/pmail.db", nil
+		return config.DBTypeSQLite, config.ROOT_PATH + "./config/pmail.db", nil
 	}
 
 	return configData.DbType, configData.DbDSN, nil
@@ -29,7 +26,7 @@ func GetDatabaseSettings(ctx *context.Context) (string, string, error) {
 func GetAdminPassword(ctx *context.Context) (string, error) {
 
 	users := []*models.User{}
-	err := db.Instance.Select(&users, "select * from user")
+	err := db.Instance.Find(&users)
 	if err != nil {
 		return "", errors.Wrap(err)
 	}
@@ -43,23 +40,23 @@ func GetAdminPassword(ctx *context.Context) (string, error) {
 
 func SetAdminPassword(ctx *context.Context, account, pwd string) error {
 	encodePwd := password.Encode(pwd)
-	res, err := db.Instance.Exec(db.WithContext(ctx, "INSERT INTO user (account, name, password) VALUES (?, 'admin',?)"), account, encodePwd)
+	var user models.User = models.User{
+		Account:  account,
+		Name:     "admin",
+		Password: encodePwd,
+		IsAdmin:  1,
+	}
+
+	_, err := db.Instance.Insert(&user)
 	if err != nil {
 		return errors.Wrap(err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return errors.Wrap(err)
-	}
-	_, err = db.Instance.Exec(db.WithContext(ctx, "INSERT INTO user_auth (user_id, email_account) VALUES (?, '*')"), id)
-	if err != nil {
-		return errors.Wrap(err)
-	}
+
 	return nil
 }
 
 func SetDatabaseSettings(ctx *context.Context, dbType, dbDSN string) error {
-	configData, err := ReadConfig()
+	configData, err := config.ReadConfig()
 	if err != nil {
 		return errors.Wrap(err)
 	}
@@ -75,50 +72,15 @@ func SetDatabaseSettings(ctx *context.Context, dbType, dbDSN string) error {
 	configData.DbType = dbType
 	configData.DbDSN = dbDSN
 
-	err = WriteConfig(configData)
+	err = config.WriteConfig(configData)
 	if err != nil {
 		return errors.Wrap(err)
 	}
 	config.Init()
 	// 检查数据库是否能正确连接
-	err = db.Init()
+	err = db.Init("")
 	if err != nil {
 		return errors.Wrap(err)
 	}
 	return nil
-}
-
-func WriteConfig(cfg *config.Config) error {
-	bytes, _ := json.Marshal(cfg)
-	err := os.WriteFile("./config/config.json", bytes, 0666)
-	if err != nil {
-		return errors.Wrap(err)
-	}
-	return nil
-}
-
-func ReadConfig() (*config.Config, error) {
-	configData := config.Config{
-		DkimPrivateKeyPath: "config/dkim/dkim.priv",
-		SSLPrivateKeyPath:  "config/ssl/private.key",
-		SSLPublicKeyPath:   "config/ssl/public.crt",
-	}
-	if !file.PathExist("./config/config.json") {
-		bytes, _ := json.Marshal(configData)
-		err := os.WriteFile("./config/config.json", bytes, 0666)
-		if err != nil {
-			return nil, errors.Wrap(err)
-		}
-	} else {
-		cfgData, err := os.ReadFile("./config/config.json")
-		if err != nil {
-			return nil, errors.Wrap(err)
-		}
-
-		err = json.Unmarshal(cfgData, &configData)
-		if err != nil {
-			return nil, errors.Wrap(err)
-		}
-	}
-	return &configData, nil
 }

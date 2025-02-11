@@ -1,26 +1,27 @@
 package rule
 
 import (
+	"github.com/Jinnrry/pmail/config"
+	"github.com/Jinnrry/pmail/consts"
+	"github.com/Jinnrry/pmail/db"
+	"github.com/Jinnrry/pmail/dto"
+	"github.com/Jinnrry/pmail/dto/parsemail"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/services/rule/match"
+	"github.com/Jinnrry/pmail/utils/context"
+	"github.com/Jinnrry/pmail/utils/send"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
-	"pmail/config"
-	"pmail/db"
-	"pmail/dto"
-	"pmail/dto/parsemail"
-	"pmail/models"
-	"pmail/services/rule/match"
-	"pmail/utils/context"
-	"pmail/utils/send"
 	"strings"
 )
 
-func GetAllRules(ctx *context.Context) []*dto.Rule {
+func GetAllRules(ctx *context.Context, userId int) []*dto.Rule {
 	var res []*models.Rule
 	var err error
-	if ctx == nil || ctx.UserID == 0 {
-		err = db.Instance.Select(&res, "select * from rule order by sort desc")
+	if userId == 0 {
+		return nil
 	} else {
-		err = db.Instance.Select(&res, db.WithContext(ctx, "select * from rule where user_id=? order by sort desc"), ctx.UserID)
+		err = db.Instance.Where("user_id=?", userId).Decr("sort").Find(&res)
 	}
 
 	if err != nil {
@@ -59,24 +60,36 @@ func MatchRule(ctx *context.Context, rule *dto.Rule, email *parsemail.Email) boo
 	return true
 }
 
-func DoRule(ctx *context.Context, rule *dto.Rule, email *parsemail.Email) {
+func DoRule(ctx *context.Context, rule *dto.Rule, email *parsemail.Email, user *models.User) {
 	log.WithContext(ctx).Debugf("执行规则:%s", rule.Name)
 
 	switch rule.Action {
 	case dto.READ:
-		email.IsRead = 1
+		if email.MessageId > 0 {
+			_, err := db.Instance.Table(&models.UserEmail{}).Where("email_id=? and user_id=?", email.MessageId, rule.UserId).Cols("is_read").Update(map[string]interface{}{"is_read": 1})
+			if err != nil {
+				log.WithContext(ctx).Errorf("sqlERror :%v", err)
+			}
+		}
 	case dto.DELETE:
-		email.Status = 3
+		_, err := db.Instance.Table(&models.UserEmail{}).Where("email_id=? and user_id=?", email.MessageId, rule.UserId).Cols("status").Update(map[string]interface{}{"status": consts.EmailStatusDel})
+		if err != nil {
+			log.WithContext(ctx).Errorf("sqlERror :%v", err)
+		}
 	case dto.FORWARD:
 		if strings.Contains(rule.Params, config.Instance.Domain) {
 			log.WithContext(ctx).Errorf("Forward Error! loop forwarding!")
 			return
 		}
-		err := send.Forward(ctx, email, rule.Params)
+		err := send.Forward(ctx, email, rule.Params, user)
 		if err != nil {
 			log.WithContext(ctx).Errorf("Forward Error:%v", err)
 		}
 	case dto.MOVE:
-		email.GroupId = cast.ToInt(rule.Params)
+		_, err := db.Instance.Table(&models.UserEmail{}).Where("email_id=? and user_id=?", email.MessageId, rule.UserId).Cols("group_id").Update(map[string]interface{}{"group_id": cast.ToInt(rule.Params)})
+		if err != nil {
+			log.WithContext(ctx).Errorf("sqlERror :%v", err)
+		}
 	}
+
 }

@@ -6,5 +6,6 @@ import (
 )
 
 func TestEncode(t *testing.T) {
-	fmt.Println(Encode("admin"))
+	fmt.Println(Encode("user2"))
+	fmt.Println(Encode("user2New"))
 }

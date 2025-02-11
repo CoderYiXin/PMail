@@ -2,39 +2,71 @@ package db
 
 import (
 	"fmt"
+	"github.com/Jinnrry/pmail/config"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/utils/context"
+	"github.com/Jinnrry/pmail/utils/errors"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	log "github.com/sirupsen/logrus"
 	_ "modernc.org/sqlite"
-	"pmail/config"
-	"pmail/utils/context"
-	"pmail/utils/errors"
-	"strings"
+	"xorm.io/xorm"
 )
 
-var Instance *sqlx.DB
+var Instance *xorm.Engine
 
-func Init() error {
+func Init(version string) error {
 	dsn := config.Instance.DbDSN
 	var err error
 
 	switch config.Instance.DbType {
 	case "mysql":
-		Instance, err = sqlx.Open("mysql", dsn)
+		Instance, err = xorm.NewEngine("mysql", dsn)
+		Instance.SetMaxOpenConns(100)
+		Instance.SetMaxIdleConns(10)
 	case "sqlite":
-		Instance, err = sqlx.Open("sqlite", dsn)
+		Instance, err = xorm.NewEngine("sqlite", dsn)
+		Instance.SetMaxOpenConns(1)
+		Instance.SetMaxIdleConns(1)
+	case "postgres":
+		Instance, err = xorm.NewEngine("postgres", dsn)
+		Instance.SetMaxOpenConns(100)
+		Instance.SetMaxIdleConns(10)
 	default:
 		return errors.New("Database Type Error!")
 	}
 	if err != nil {
+		log.Errorf("DB init Error! %s", err.Error())
 		return errors.Wrap(err)
 	}
-	Instance.SetMaxOpenConns(100)
-	Instance.SetMaxIdleConns(10)
-	//showMySQLCharacterSet()
-	checkTable()
-	// 处理版本升级带来的数据表变更
-	databaseUpdate()
+
+	Instance.ShowSQL(false)
+	// 同步表结构
+	syncTables()
+
+	// 更新历史数据
+	fixHistoryData()
+
+	// 在数据库中记录程序版本
+	var v models.Version
+	_, err = Instance.Get(&v)
+	if err != nil {
+		panic(err)
+	}
+
+	if version != "" && v.Info != version && version != "test" {
+		v.Info = version
+		if v.Id == 0 {
+			Instance.Insert(&v)
+		} else {
+			Instance.Update(&v)
+		}
+	}
+
+	if config.Instance.LogLevel == "debug" {
+		Instance.ShowSQL(true)
+	}
+
 	return nil
 }
 
@@ -46,68 +78,92 @@ func WithContext(ctx *context.Context, sql string) string {
 	return sql
 }
 
-type tables struct {
-	TablesInPmail string `db:"Tables_in_pmail"`
-}
-
-func checkTable() {
-	var res []*tables
-
-	var err error
-	if config.Instance.DbType == "sqlite" {
-		err = Instance.Select(&res, "select name as `Tables_in_pmail` from sqlite_master where type='table'")
-	} else {
-		err = Instance.Select(&res, "show tables")
-	}
+func syncTables() {
+	err := Instance.Sync2(&models.User{})
 	if err != nil {
 		panic(err)
 	}
-	existTable := map[string]struct{}{}
-	for _, tableName := range res {
-		existTable[tableName.TablesInPmail] = struct{}{}
+	err = Instance.Sync2(&models.Email{})
+	if err != nil {
+		panic(err)
+	}
+	err = Instance.Sync2(&models.Group{})
+	if err != nil {
+		panic(err)
+	}
+	err = Instance.Sync2(&models.Rule{})
+	if err != nil {
+		panic(err)
+	}
+	err = Instance.Sync2(&models.Sessions{})
+	if err != nil {
+		panic(err)
+	}
+	err = Instance.Sync2(&models.UserEmail{})
+	if err != nil {
+		panic(err)
+	}
+	err = Instance.Sync2(&models.Version{})
+	if err != nil {
+		panic(err)
+	}
+}
+
+func fixHistoryData() {
+	var ueNum int
+	_, err := Instance.Table(&models.UserEmail{}).Select("count(1)").Get(&ueNum)
+	if err != nil {
+		panic(err)
+	}
+	if ueNum > 0 {
+		return
 	}
 
-	for tableName, createSQL := range config.Instance.Tables {
-		if _, ok := existTable[tableName]; !ok {
-			_, err = Instance.Exec(createSQL)
-			log.Infof("Create Table: %s", createSQL)
-			if err != nil {
-				panic(err)
-			}
+	// 只有一个管理员用户
+	var user []models.User
+	err = Instance.Table(&models.User{}).OrderBy("id asc").Find(&user)
+	if err != nil {
+		panic(err)
+	}
 
-			if initData, ok := config.Instance.TablesInitData[tableName]; ok {
-				_, err = Instance.Exec(initData)
-				log.Infof("Init Table: %s", initData)
-				if err != nil {
-					panic(err)
-				}
-			}
-
+	// 只有一个账号，且不是管理员账号，将账号提权为管理员
+	if len(user) == 1 && user[0].IsAdmin == 0 {
+		u := user[0]
+		u.IsAdmin = 1
+		_, err = Instance.Update(&u)
+		if err != nil {
+			panic(err)
 		}
 	}
-}
 
-type tableSQL struct {
-	Table       string `db:"Table"`
-	CreateTable string `db:"Create Table"`
-}
-
-func databaseUpdate() {
-	// 检查email表是否有group id
-	var err error
-	var res []tableSQL
-	if config.Instance.DbType == "sqlite" {
-		err = Instance.Select(&res, "select sql as `Create Table` from sqlite_master where type='table' and tbl_name = 'email'")
-	} else {
-		err = Instance.Select(&res, "show create table `email`")
+	if len(user) != 1 {
+		return
 	}
 
+	// 以前有邮件
+	var emails []*models.Email
+	err = Instance.Table(&models.Email{}).Select("id,status").OrderBy("id asc").Find(&emails)
 	if err != nil {
 		panic(err)
 	}
-
-	if len(res) > 0 && !strings.Contains(res[0].CreateTable, "group_id") {
-		Instance.Exec("alter table email add group_id integer default 0 not null;")
+	if len(emails) == 0 {
+		return
 	}
+
+	log.Infof("Sync History Data！Please Wait！")
+
+	// 把以前的邮件，全部分到管理员账号下面去
+	for _, email := range emails {
+		ue := models.UserEmail{
+			UserID:  user[0].ID,
+			EmailID: email.Id,
+			Status:  email.Status,
+		}
+		_, err = Instance.Insert(&ue)
+		if err != nil {
+			log.Errorf("SQL Error: %v", err)
+		}
+	}
+	log.Infof("Sync History Data Finished. Num: %d", len(emails))
 
 }

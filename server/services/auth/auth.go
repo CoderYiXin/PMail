@@ -7,36 +7,27 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"github.com/Jinnrry/pmail/db"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/utils/context"
 	log "github.com/sirupsen/logrus"
 	"os"
-	"pmail/db"
-	"pmail/models"
-	"pmail/utils/context"
 	"strings"
 )
 
 // HasAuth 检查当前用户是否有某个邮件的auth
 func HasAuth(ctx *context.Context, email *models.Email) bool {
-	// 获取当前用户的auth
-	var auth []models.UserAuth
-	err := db.Instance.Select(&auth, db.WithContext(ctx, "select * from user_auth where user_id = ?"), ctx.UserID)
+	if ctx.IsAdmin {
+		return true
+	}
+	var ue []models.UserEmail
+	err := db.Instance.Table(&models.UserEmail{}).Where("email_id = ? and user_id = ?", email.Id, ctx.UserID).Find(&ue)
 	if err != nil {
-		log.WithContext(ctx).Errorf("SQL error:%+v", err)
+		log.Errorf("Error while checking user: %v", err)
 		return false
 	}
 
-	var hasAuth bool
-	for _, userAuth := range auth {
-		if userAuth.EmailAccount == "*" {
-			hasAuth = true
-			break
-		} else if strings.Contains(email.Bcc, ctx.UserAccount) || strings.Contains(email.Cc, ctx.UserAccount) || strings.Contains(email.To, ctx.UserAccount) {
-			hasAuth = true
-			break
-		}
-	}
-
-	return hasAuth
+	return len(ue) != 0
 }
 
 func DkimGen() string {

@@ -2,21 +2,23 @@ package controllers
 
 import (
 	"encoding/json"
+	"github.com/Jinnrry/pmail/db"
+	"github.com/Jinnrry/pmail/dto"
+	"github.com/Jinnrry/pmail/dto/response"
+	"github.com/Jinnrry/pmail/i18n"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/services/rule"
+	"github.com/Jinnrry/pmail/utils/address"
+	"github.com/Jinnrry/pmail/utils/array"
+	"github.com/Jinnrry/pmail/utils/context"
+	"github.com/Jinnrry/pmail/utils/errors"
 	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
-	"pmail/db"
-	"pmail/dto"
-	"pmail/dto/response"
-	"pmail/i18n"
-	"pmail/services/rule"
-	"pmail/utils/address"
-	"pmail/utils/array"
-	"pmail/utils/context"
 )
 
 func GetRule(ctx *context.Context, w http.ResponseWriter, req *http.Request) {
-	res := rule.GetAllRules(ctx)
+	res := rule.GetAllRules(ctx, ctx.UserID)
 	response.NewSuccessResponse(res).FPrint(w)
 }
 
@@ -48,12 +50,30 @@ func UpsertRule(ctx *context.Context, w http.ResponseWriter, req *http.Request) 
 		}
 	}
 
-	err = data.Encode().Save(ctx)
+	err = save(ctx, data.Encode())
 	if err != nil {
 		response.NewErrorResponse(response.ServerError, "server error", err).FPrint(w)
 		return
 	}
 	response.NewSuccessResponse("succ").FPrint(w)
+}
+
+func save(ctx *context.Context, p *models.Rule) error {
+
+	if p.Id > 0 {
+		_, err := db.Instance.Exec(db.WithContext(ctx, "update rule set name=? ,value = ? ,action = ?,params = ?,sort = ? where id = ?"), p.Name, p.Value, p.Action, p.Params, p.Sort, p.Id)
+		if err != nil {
+			return errors.Wrap(err)
+		}
+		return nil
+	} else {
+		_, err := db.Instance.Exec(db.WithContext(ctx, "insert into rule (name,value,user_id,action,params,sort) values (?,?,?,?,?,?)"), p.Name, p.Value, ctx.UserID, p.Action, p.Params, p.Sort)
+		if err != nil {
+			return errors.Wrap(err)
+		}
+		return nil
+	}
+
 }
 
 type delRuleReq struct {

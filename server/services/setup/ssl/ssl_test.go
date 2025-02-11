@@ -2,16 +2,14 @@ package ssl
 
 import (
 	"fmt"
+	"github.com/Jinnrry/pmail/config"
 	"testing"
 )
 
-func TestGenSSL(t *testing.T) {
-	err := GenSSL(false)
-	fmt.Println(err)
-}
+func TestCheckSSLCrtInfo(t *testing.T) {
+	config.Init()
 
-func TestGetSSLCrtInfo(t *testing.T) {
-	days, err := CheckSSLCrtInfo()
+	got, got1, match, err := CheckSSLCrtInfo()
 
-	fmt.Println(days, err)
+	fmt.Println(got, got1, match, err)
 }

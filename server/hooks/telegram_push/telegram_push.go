@@ -1,15 +1,17 @@
-package telegram_push
+package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"pmail/config"
-	"pmail/dto/parsemail"
-	"pmail/utils/context"
-	"strings"
-
+	"github.com/Jinnrry/pmail/config"
+	"github.com/Jinnrry/pmail/dto/parsemail"
+	"github.com/Jinnrry/pmail/hooks/framework"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/utils/context"
 	log "github.com/sirupsen/logrus"
+	"net/http"
+	"os"
+	"strings"
 )
 
 type TelegramPushHook struct {
@@ -17,6 +19,34 @@ type TelegramPushHook struct {
 	botToken     string
 	httpsEnabled int
 	webDomain    string
+}
+
+func (w *TelegramPushHook) ReceiveSaveAfter(ctx *context.Context, email *parsemail.Email, ue []*models.UserEmail) {
+	if w.chatId == "" || w.botToken == "" {
+		return
+	}
+
+	for _, u := range ue {
+		// 管理员（Uid=1）收到邮件且非已读、非已删除 触发通知
+		if u.UserID == 1 && u.IsRead == 0 && u.Status != 3 && email.MessageId > 0 {
+			w.sendUserMsg(nil, email)
+		}
+	}
+
+}
+
+// GetName 获取插件名称
+func (w *TelegramPushHook) GetName(ctx *context.Context) string {
+	return "TgPush"
+}
+
+// SettingsHtml 插件页面
+func (w *TelegramPushHook) SettingsHtml(ctx *context.Context, url string, requestData string) string {
+	return fmt.Sprintf(`
+<div>
+	 TG push No Settings Page
+</div>
+`)
 }
 
 func (w *TelegramPushHook) SendBefore(ctx *context.Context, email *parsemail.Email) {
@@ -27,17 +57,11 @@ func (w *TelegramPushHook) SendAfter(ctx *context.Context, email *parsemail.Emai
 
 }
 
-func (w *TelegramPushHook) ReceiveParseBefore(email []byte) {
+func (w *TelegramPushHook) ReceiveParseBefore(ctx *context.Context, email *[]byte) {
 
 }
 
-func (w *TelegramPushHook) ReceiveParseAfter(email *parsemail.Email) {
-	if w.chatId == "" || w.botToken == "" {
-		return
-	}
-
-	w.sendUserMsg(nil, email)
-}
+func (w *TelegramPushHook) ReceiveParseAfter(ctx *context.Context, email *parsemail.Email) {}
 
 type SendMessageRequest struct {
 	ChatID      string      `json:"chat_id"`
@@ -84,13 +108,59 @@ func (w *TelegramPushHook) sendUserMsg(ctx *context.Context, email *parsemail.Em
 	}
 
 }
+
+type Config struct {
+	TgBotToken string `json:"tgBotToken"`
+	TgChatId   string `json:"tgChatId"`
+}
+
 func NewTelegramPushHook() *TelegramPushHook {
+	var cfgData []byte
+	var err error
+
+	cfgData, err = os.ReadFile("./config/config.json")
+	if err != nil {
+		panic(err)
+	}
+	var mainConfig *config.Config
+	err = json.Unmarshal(cfgData, &mainConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	var pluginConfig *Config
+	if _, err := os.Stat("./plugins/telegram_push_config.json"); err == nil {
+		cfgData, err = os.ReadFile("./plugins/telegram_push_config.json")
+		if err != nil {
+			panic(err)
+		}
+		err = json.Unmarshal(cfgData, &pluginConfig)
+		if err != nil {
+			panic(err)
+		}
+
+	}
+
+	token := ""
+	chatID := ""
+	if pluginConfig != nil {
+		token = pluginConfig.TgBotToken
+		chatID = pluginConfig.TgChatId
+	} else {
+		token = mainConfig.TgBotToken
+		chatID = mainConfig.TgChatId
+	}
+
 	ret := &TelegramPushHook{
-		botToken:     config.Instance.TgBotToken,
-		chatId:       config.Instance.TgChatId,
-		webDomain:    config.Instance.WebDomain,
-		httpsEnabled: config.Instance.HttpsEnabled,
+		botToken:     token,
+		chatId:       chatID,
+		webDomain:    mainConfig.WebDomain,
+		httpsEnabled: mainConfig.HttpsEnabled,
 	}
 	return ret
 
+}
+
+func main() {
+	framework.CreatePlugin("telegram_push", NewTelegramPushHook()).Run()
 }

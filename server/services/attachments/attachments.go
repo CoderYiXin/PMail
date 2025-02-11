@@ -2,19 +2,19 @@ package attachments
 
 import (
 	"encoding/json"
+	"github.com/Jinnrry/pmail/db"
+	"github.com/Jinnrry/pmail/dto/parsemail"
+	"github.com/Jinnrry/pmail/models"
+	"github.com/Jinnrry/pmail/services/auth"
+	"github.com/Jinnrry/pmail/utils/context"
 	log "github.com/sirupsen/logrus"
-	"pmail/db"
-	"pmail/dto/parsemail"
-	"pmail/models"
-	"pmail/services/auth"
-	"pmail/utils/context"
 )
 
 func GetAttachments(ctx *context.Context, emailId int, cid string) (string, []byte) {
 
 	// 获取邮件内容
 	var email models.Email
-	err := db.Instance.Get(&email, db.WithContext(ctx, "select * from email where id = ?"), emailId)
+	_, err := db.Instance.ID(emailId).Get(&email)
 	if err != nil {
 		log.WithContext(ctx).Errorf("SQL error:%+v", err)
 		return "", nil
@@ -39,7 +39,7 @@ func GetAttachmentsByIndex(ctx *context.Context, emailId int, index int) (string
 
 	// 获取邮件内容
 	var email models.Email
-	err := db.Instance.Get(&email, db.WithContext(ctx, "select * from email where id = ?"), emailId)
+	_, err := db.Instance.ID(emailId).Get(&email)
 	if err != nil {
 		log.WithContext(ctx).Errorf("SQL error:%+v", err)
 		return "", nil
